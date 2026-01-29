@@ -1,7 +1,32 @@
 def get_model(config, num_class, is_pruning=False):
     myself_net = ['FeatherNetB','FeatherNetA', 'ResNet_hd', 'ShffleNetV2_hd', 'ShffleNetV2_hd_v3','ShffleNetV2_hd_v4','ShffleNetV2_hd_v5',
-    'ShffleNetV2_hd_v1','ShffleNetV2_hd_v2', 'MobileNetV2_hd', 'GhostNet_hd', 'FiveNet','FiveNet_5','FiveNet_1','FiveNet_6', 'FiveNet_4', 
-    'FiveNet_3','FiveNet_2', 'FiveNet_2_1','FiveNet_2_2','FiveNet_2_3','FiveNet_2_4','FiveNet_2_5','SixNet']
+    'ShffleNetV2_hd_v1','ShffleNetV2_hd_v2', 'MobileNetV2_hd', 'GhostNet_hd', 'FiveNet','FiveNet_5','FiveNet_1','FiveNet_6', 'FiveNet_4',
+    'FiveNet_3','FiveNet_2', 'FiveNet_2_1','FiveNet_2_2','FiveNet_2_3','FiveNet_2_4','FiveNet_2_5','SixNet',
+    'ShffleNetV2_hd_v1_hybrid_a', 'ShffleNetV2_hd_v1_hybrid_b', 'ShffleNetV2_hd_v1_hybrid_c', 'ShffleNetV2_hd_v1_hybrid_d']
+
+    # Handle hybrid models separately
+    if config.model in ['ShffleNetV2_hd_v1_hybrid_a', 'ShffleNetV2_hd_v1_hybrid_b',
+                        'ShffleNetV2_hd_v1_hybrid_c', 'ShffleNetV2_hd_v1_hybrid_d']:
+        from model.ShffleNetV2_hd_v1_hybrid import Multi_FusionNet_Hybrid
+        mode_map = {
+            'ShffleNetV2_hd_v1_hybrid_a': 'hybrid_a',
+            'ShffleNetV2_hd_v1_hybrid_b': 'hybrid_b',
+            'ShffleNetV2_hd_v1_hybrid_c': 'hybrid_c',
+            'ShffleNetV2_hd_v1_hybrid_d': 'hybrid_d',
+        }
+        hybrid_mode = mode_map[config.model]
+        guidance_modality = getattr(config, 'guidance_modality', 'depth')
+        adaptive_guidance = getattr(config, 'adaptive_guidance', False)
+        net = Multi_FusionNet_Hybrid(
+            num_class=num_class,
+            hybrid_mode=hybrid_mode,
+            use_eca=True,
+            guidance_modality=guidance_modality,
+            adaptive_guidance=adaptive_guidance
+        )
+        net.print_info()
+        return net
+
     if config.model in myself_net:
         if config.model in ['FeatherNetB','FeatherNetA']:
             from model.FeatherNet import Multi_FusionNet, Two_StreamNet, Single_branchNet
@@ -25,7 +50,10 @@ def get_model(config, num_class, is_pruning=False):
             raise Exception('This model name is not implemented yet.')
 
         if config.is_Multi:
-            net = Multi_FusionNet()
+            guidance_modality = getattr(config, 'guidance_modality', 'depth')
+            adaptive_guidance = getattr(config, 'adaptive_guidance', False)
+            net = Multi_FusionNet(guidance_modality=guidance_modality,
+                                  adaptive_guidance=adaptive_guidance)
         elif config.is_Wave:
             if is_pruning:
                 net = Two_StreamNet_Pruning()

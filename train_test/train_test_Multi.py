@@ -25,7 +25,7 @@ def train_one_epoch(epoch, train_loader, net, criterion, sgdr, optimizer, config
         input = input.to(device)
         truth = truth.to(device)
         mask = mask.to(device)
-        logit, depth_logits, color_logits, ir_logits, x_map = net.forward(input)
+        logit, depth_logits, color_logits, ir_logits, x_map, _ = net.forward(input)
         truth = truth.view(logit.shape[0])
 
         x_map = x_map.to(torch.float32)
@@ -82,6 +82,7 @@ def do_test(net, test_loader, criterion, config):
     probs = []
     probs1, probs2, probs3, probs4 = [], [], [], []
     labels = []
+    all_guidance_weights = []  # Collect guidance weights for analysis
     # for i, (input, truth) in enumerate(tqdm(test_loader)):
     for i, (input, mask, truth) in enumerate(test_loader):
         b, n, c, w, h = input.size()
@@ -89,7 +90,11 @@ def do_test(net, test_loader, criterion, config):
         input = input.to(device)
         truth = truth.to(device)
         with torch.no_grad():
-            logit, depth_logits, color_logits, ir_logits, x_map = net(input)
+            logit, depth_logits, color_logits, ir_logits, x_map, guidance_weights = net(input)
+            if guidance_weights is not None:
+                # Average weights over n augmentations per sample: [b*n, 3] -> [b, n, 3] -> [b, 3]
+                gw = guidance_weights.view(b, n, 3).mean(dim=1)
+                all_guidance_weights.append(gw.cpu())
             logit = logit.view(b, n, logit.shape[1])
 
             # color_logits = color_logits.view(b, n, color_logits.shape[1])
@@ -144,7 +149,7 @@ def do_test(net, test_loader, criterion, config):
     print(f"[Validation Debug] True labels - Class 0: {np.sum(labels == 0)}, "
           f"Class 1: {np.sum(labels == 1)}")
 
-    
+
     """
     probs1 = np.concatenate(probs1)
     probs1 = probs1[:, 1].T
@@ -157,11 +162,34 @@ def do_test(net, test_loader, criterion, config):
     probs3 = np.concatenate(probs3)
     probs3 = probs3[:, 1].T
     test_eval_ir, test_TPR_FPRS_ir, threshold_ir = model_performances(probs3, labels)
-    
-    
+
+
     print(f"Depth分支===ACC: {test_eval1['ACC']}, ACER: {test_eval1['ACER']}, APCER: {test_eval1['APCER']}, BPCER: {test_eval1['BPCER']}\n"
           f"color分支===ACC: {test_eval_rgb['ACC']}, ACER: {test_eval_rgb['ACER']}, APCER: {test_eval_rgb['APCER']}, BPCER: {test_eval_rgb['BPCER']}\n"
           f"ir分支===   ACC: {test_eval_ir['ACC']}, ACER: {test_eval_ir['ACER']}, APCER: {test_eval_ir['APCER']}, BPCER: {test_eval_ir['BPCER']}\n"
           )
     """
+
+    # Guidance weights analysis (for adaptive guidance mode)
+    if all_guidance_weights:
+        weights = torch.cat(all_guidance_weights, dim=0)  # [N, 3]
+        print(f"\n{'='*50}")
+        print(f"=== Guidance Weights Analysis ===")
+        print(f"{'='*50}")
+        print(f"Mean weights: depth={weights[:, 0].mean():.4f}, color={weights[:, 1].mean():.4f}, ir={weights[:, 2].mean():.4f}")
+        print(f"Std weights:  depth={weights[:, 0].std():.4f}, color={weights[:, 1].std():.4f}, ir={weights[:, 2].std():.4f}")
+        print(f"Min weights:  depth={weights[:, 0].min():.4f}, color={weights[:, 1].min():.4f}, ir={weights[:, 2].min():.4f}")
+        print(f"Max weights:  depth={weights[:, 0].max():.4f}, color={weights[:, 1].max():.4f}, ir={weights[:, 2].max():.4f}")
+
+        # Per-class analysis (real vs spoof)
+        labels_tensor = torch.from_numpy(labels)
+        real_mask = (labels_tensor == 0)
+        spoof_mask = (labels_tensor == 1)
+
+        if real_mask.sum() > 0:
+            print(f"\nReal samples ({real_mask.sum().item()}):  depth={weights[real_mask, 0].mean():.4f}, color={weights[real_mask, 1].mean():.4f}, ir={weights[real_mask, 2].mean():.4f}")
+        if spoof_mask.sum() > 0:
+            print(f"Spoof samples ({spoof_mask.sum().item()}): depth={weights[spoof_mask, 0].mean():.4f}, color={weights[spoof_mask, 1].mean():.4f}, ir={weights[spoof_mask, 2].mean():.4f}")
+        print(f"{'='*50}\n")
+
     return loss, correct, probs, labels

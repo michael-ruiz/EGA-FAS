@@ -15,6 +15,11 @@ def get_input_config():
     parser.add_argument('--pretrained_model', type=str, default=None)
 
     parser.add_argument('--is_Multi', type=bool, default=False)
+    parser.add_argument('--guidance_modality', type=str, default='depth',
+                        choices=['depth', 'color', 'ir'],
+                        help="Modality for cross-attention guidance: 'depth' (default), 'color', 'ir'")
+    parser.add_argument('--adaptive_guidance', action='store_true', default=False,
+                        help="Enable adaptive guidance selection (learns per-sample weights)")
 
     parser.add_argument('--dataset_name', type=str, default='CASIA',
                         help="data_name in ['OULU-NPU', 'CASIA', 'SIW', 'RA', 'MSU', 'CASIA-SURF']")
@@ -42,6 +47,8 @@ class All_Config_setting(object):
         self.pretrained_model = config.pretrained_model
         # 单模态、多模态
         self.is_Multi = config.is_Multi
+        self.guidance_modality = config.guidance_modality
+        self.adaptive_guidance = config.adaptive_guidance
         # 数据集名称、协议+子协议
         self.dataset_name = config.dataset_name
         self.prot = config.prot

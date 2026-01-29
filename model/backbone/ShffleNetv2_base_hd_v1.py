@@ -11,7 +11,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.backbone.Common_fun import ECALayer, GhostModule
+from model.backbone.Common_fun import SELayer, ECALayer, GhostModule
 
 
 def channel_shuffle(x, groups):
@@ -30,9 +30,10 @@ def channel_shuffle(x, groups):
 
     return x
 
+
 class ShuffleUnit(nn.Module):
 
-    def __init__(self, in_channels, out_channels, stride):
+    def __init__(self, in_channels, out_channels, stride, use_ghost=False):
         super().__init__()
 
         self.stride = stride
@@ -46,12 +47,23 @@ class ShuffleUnit(nn.Module):
                 nn.ReLU(inplace=True))
 
         if stride != 1 or in_channels != out_channels:
-            self.residual = nn.Sequential(
-                GhostModule(mid_channels, mid_channels, kernel_size=3, stride=stride, relu=True),
-                nn.Conv2d(mid_channels, int(out_channels / 2), 1),
-                nn.BatchNorm2d(int(out_channels / 2)),
-                nn.ReLU(inplace=True)
-            )
+            if use_ghost:
+                # ECA + Ghost version
+                self.residual = nn.Sequential(
+                    GhostModule(mid_channels, mid_channels, kernel_size=3, stride=stride, relu=True),
+                    nn.Conv2d(mid_channels, int(out_channels / 2), 1),
+                    nn.BatchNorm2d(int(out_channels / 2)),
+                    nn.ReLU(inplace=True)
+                )
+            else:
+                # Original SE + Depthwise version
+                self.residual = nn.Sequential(
+                    nn.Conv2d(mid_channels, mid_channels, 3, stride=stride, padding=1, groups=mid_channels),
+                    nn.BatchNorm2d(mid_channels),
+                    nn.Conv2d(mid_channels, int(out_channels / 2), 1),
+                    nn.BatchNorm2d(int(out_channels / 2)),
+                    nn.ReLU(inplace=True)
+                )
 
             self.shortcut = nn.Sequential(
                 nn.AvgPool2d(2, stride=2),
@@ -60,18 +72,27 @@ class ShuffleUnit(nn.Module):
             )
 
         else:
-
-            # main branch
-            self.residual = nn.Sequential(
-                GhostModule(mid_channels, mid_channels, kernel_size=3, stride=stride, relu=True),
-                nn.Conv2d(mid_channels, mid_channels, 1),
-                nn.BatchNorm2d(mid_channels),
-                nn.ReLU(inplace=True)
-            )
+            if use_ghost:
+                # ECA + Ghost version
+                self.residual = nn.Sequential(
+                    GhostModule(mid_channels, mid_channels, kernel_size=3, stride=stride, relu=True),
+                    nn.Conv2d(mid_channels, mid_channels, 1),
+                    nn.BatchNorm2d(mid_channels),
+                    nn.ReLU(inplace=True)
+                )
+            else:
+                # Original SE + Depthwise version
+                self.residual = nn.Sequential(
+                    nn.Conv2d(mid_channels, mid_channels, 3, stride=stride, padding=1, groups=mid_channels),
+                    nn.BatchNorm2d(mid_channels),
+                    nn.Conv2d(mid_channels, mid_channels, 1),
+                    nn.BatchNorm2d(mid_channels),
+                    nn.ReLU(inplace=True)
+                )
             self.shortcut = nn.Sequential()
 
     def forward(self, x):
-        
+
         primary_conv = self.primary_conv(x)
         shortcut = self.shortcut(primary_conv)
         residual = self.residual(primary_conv)
@@ -87,8 +108,15 @@ class ShuffleUnit(nn.Module):
 
 class ShuffleNetV2(nn.Module):
 
-    def __init__(self, class_num=100, input_c = 3):
+    def __init__(self, class_num=100, input_c=3, use_eca_ghost=False):
+        """
+        Args:
+            class_num: number of classes
+            input_c: input channels
+            use_eca_ghost: if True, use ECA + Ghost modules; if False, use SE + Depthwise (original)
+        """
         super().__init__()
+        self.use_eca_ghost = use_eca_ghost
         stage_layers = [2, 6, 3]
 
         out_channels = [16, 32, 48, 64]
@@ -101,11 +129,11 @@ class ShuffleNetV2(nn.Module):
         )
 
         self.stage2 = self._make_stage(init_c, out_channels[0], stage_layers[0])
-        self.se2 = ECALayer(out_channels[0])
+        self.se2 = ECALayer(out_channels[0]) if use_eca_ghost else SELayer(out_channels[0])
         self.stage3 = self._make_stage(out_channels[0], out_channels[1], stage_layers[1])
-        self.se3 = ECALayer(out_channels[1])
+        self.se3 = ECALayer(out_channels[1]) if use_eca_ghost else SELayer(out_channels[1])
         self.stage4 = self._make_stage(out_channels[1], out_channels[2],stage_layers[2])
-        self.se4 = ECALayer(out_channels[2])
+        self.se4 = ECALayer(out_channels[2]) if use_eca_ghost else SELayer(out_channels[2])
         self.conv5 = nn.Sequential(
             nn.Conv2d(out_channels[2], out_channels[3], 1),
             nn.BatchNorm2d(out_channels[3]),
@@ -126,13 +154,14 @@ class ShuffleNetV2(nn.Module):
 
     def _make_stage(self, in_channels, out_channels, repeat):
         layers = []
-        layers.append(ShuffleUnit(in_channels, out_channels, 2))
+        layers.append(ShuffleUnit(in_channels, out_channels, 2, use_ghost=self.use_eca_ghost))
 
         while repeat:
-            layers.append(ShuffleUnit(out_channels, out_channels, 1))
+            layers.append(ShuffleUnit(out_channels, out_channels, 1, use_ghost=self.use_eca_ghost))
             repeat -= 1
 
         return nn.Sequential(*layers)
 
-def shufflenetv2():
-    return ShuffleNetV2(input_c = 3)
+
+def shufflenetv2(use_eca_ghost=True):
+    return ShuffleNetV2(input_c=3, use_eca_ghost=use_eca_ghost)
