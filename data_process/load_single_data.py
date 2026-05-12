@@ -40,11 +40,13 @@ def Data_Cut(config):
         data_cut = {'train': 2, 'val': 1, 'test': 1}
     elif config.dataset_name == 'OULU-NPU':
         if config.prot in ['1', '2']:
-            data_cut = {'train': 4, 'val': 20, 'test': 30}
+            data_cut = {'train': 1, 'val': 5, 'test': 5}
         elif config.prot == '3':
-            data_cut = {'train': 2, 'val': 30, 'test': 10}
+            data_cut = {'train': 1, 'val': 5, 'test': 5}
         elif config.prot == '4':
-            data_cut = {'train': 1, 'val': 30, 'test': 2}
+            data_cut = {'train': 1, 'val': 5, 'test': 2}
+        if config.mode == 'infer_test':
+            data_cut['test'] = 1
     elif config.dataset_name == 'SIW':
         if config.prot == '1':
             data_cut = {'train': 1, 'val': 300, 'test': 300}
@@ -52,6 +54,13 @@ def Data_Cut(config):
             data_cut = {'train': 15, 'val': 350, 'test': 350}
         elif config.prot == '3' or (config.prot == '2' and config.sub_prot in ['1', '3', '4']):
             data_cut = {'train': 15, 'val': 150, 'test': 150}
+    elif config.dataset_name == 'VFPAD':
+        data_cut = {'train': 1, 'val': 1, 'test': 1}
+        if config.mode == 'infer_test':
+            data_cut['test'] = 1
+    elif config.dataset_name in ['CASIA-FASD', 'Replay-Attack', 'CASIA_FASD-RA', 'RA-CASIA_FASD',
+                                    'WMCA-HQWMCA', 'HQWMCA-WMCA']:
+        data_cut = {'train': 1, 'val': 1, 'test': 1}
 
     return data_cut
 
@@ -129,7 +138,7 @@ class FAS_single_Dataset(Dataset):
         else:
             self.augment = ir_augumentor
         # if self.data_name == 'OULU-NPU':
-            # self.augment = augumentor_OULU
+        #     self.augment = augumentor_OULU
 
     def set_mode(self, config):
         data_cut = Data_Cut(config)
@@ -181,6 +190,13 @@ class FAS_single_Dataset(Dataset):
                 color, depth, ir, label = self.train_list[index]
             else:
                 color, depth, ir, label = self.val_list[index]
+        elif self.data_name == 'VFPAD':
+            # 2-column format: path label (single NIR modality)
+            if self.isVal == 'train':
+                img_sub_path, label = self.train_list[index]
+            else:
+                img_sub_path, label = self.val_list[index]
+            return img_sub_path, label
 
         if self.modality == 'color':
             img_sub_path = color

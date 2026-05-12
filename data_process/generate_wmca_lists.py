@@ -120,7 +120,8 @@ class WMCAListGenerator:
         """Create subject-disjoint train/dev/test splits with stratification
 
         Using approximately: 36% train, 33% dev, 31% test based on WMCA docs
-        Ensures each split has subjects with attack samples
+        Ensures each split has subjects with attack samples, including
+        per-attack-type coverage so every attack type appears in every split.
         """
         # Categorize subjects by whether they have attack samples
         subjects_with_attacks = []
@@ -164,6 +165,72 @@ class WMCAListGenerator:
             subjects_with_attacks[n_train_attack+n_dev_attack:] +
             subjects_bonafide_only[n_train_bonafide+n_dev_bonafide:]
         )
+
+        # Per-attack-type coverage verification and repair
+        # Build subject → attack types mapping
+        subject_attack_types = defaultdict(set)
+        for subject, samples in file_dict.items():
+            for s in samples:
+                if s['type_id'] != '0':
+                    subject_attack_types[subject].add(s['type_id'])
+
+        # Collect all attack types used across protocols
+        all_attack_types = set()
+        for types in self.protocol_type_map.values():
+            all_attack_types.update(types)
+
+        splits = {'train': train_subjects, 'dev': dev_subjects, 'test': test_subjects}
+        split_names = ['train', 'dev', 'test']
+
+        for attack_type in sorted(all_attack_types):
+            # Check coverage per split
+            for split_name in split_names:
+                has_coverage = any(
+                    attack_type in subject_attack_types.get(s, set())
+                    for s in splits[split_name]
+                )
+                if has_coverage:
+                    continue
+
+                # Find a donor split that has >1 subject with this attack type
+                donor = None
+                donor_subject = None
+                for other_split in split_names:
+                    if other_split == split_name:
+                        continue
+                    candidates = [
+                        s for s in splits[other_split]
+                        if attack_type in subject_attack_types.get(s, set())
+                    ]
+                    if len(candidates) > 1:
+                        donor = other_split
+                        donor_subject = candidates[0]
+                        break
+
+                if donor_subject is None:
+                    # All subjects with this type are in one split; take from whichever has them
+                    for other_split in split_names:
+                        if other_split == split_name:
+                            continue
+                        candidates = [
+                            s for s in splits[other_split]
+                            if attack_type in subject_attack_types.get(s, set())
+                        ]
+                        if candidates:
+                            donor = other_split
+                            donor_subject = candidates[0]
+                            break
+
+                if donor_subject:
+                    type_name = self.type_mapping.get(attack_type, attack_type)
+                    print(f"  Coverage fix: moving subject {donor_subject} "
+                          f"from {donor} to {split_name} for type {attack_type} ({type_name})")
+                    splits[donor].discard(donor_subject)
+                    splits[split_name].add(donor_subject)
+
+        train_subjects = splits['train']
+        dev_subjects = splits['dev']
+        test_subjects = splits['test']
 
         print(f"\nSubject splits:")
         print(f"  Train: {len(train_subjects)} subjects")

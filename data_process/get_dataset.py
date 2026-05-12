@@ -14,7 +14,8 @@ def get_dataset(config, t_path, isVal):
     num_workers = config.num_workers
     batch_size_test = math.ceil(config.batch_size)
     balance = False
-    if config.dataset_name in ['OULU-NPU', 'SIW']:
+    if config.dataset_name in ['OULU-NPU', 'SIW', 'CASIA_FASD-RA', 'RA-CASIA_FASD', 'CASIA-FASD', 'Replay-Attack',
+                                'WMCA-HQWMCA', 'HQWMCA-WMCA']:
         balance = True
 
     if isVal == 'train':
@@ -23,7 +24,7 @@ def get_dataset(config, t_path, isVal):
                                  num_workers=num_workers)
     else:
         curr_data = FAS_Dataset(t_path['image_dir'], t_path['prot_list'], config=config, balance=False, isVal=isVal)
-        curr_loader = DataLoader(curr_data, shuffle=False, batch_size=batch_size_test, drop_last=True,
+        curr_loader = DataLoader(curr_data, shuffle=False, batch_size=batch_size_test, drop_last=False,
                                  num_workers=num_workers)
 
     load_dataset = curr_loader

@@ -92,6 +92,45 @@ def Get_path(data_name, prot = '1', sub_prot = None):
         test_image_dir = f'{Dir}/{NAME}/'
         test_list = f"{Dir}/{NAME}/{PROT}/{prot}_test_list.txt"
 
+    elif data_name == 'HQ-WMCA':
+        hqwmca_dir = f'{Dir}/HQ-WMCA/'
+        train_image_dir = hqwmca_dir
+        train_list = f'{Dir}/HQ-WMCA/protocols/{prot}/train_list_multi.txt'
+        val_image_dir = hqwmca_dir
+        val_list = f'{Dir}/HQ-WMCA/protocols/{prot}/val_list_multi.txt'
+        test_image_dir = hqwmca_dir
+        test_list = f'{Dir}/HQ-WMCA/protocols/{prot}/test_list_multi.txt'
+
+    elif data_name == 'CASIA-FASD':
+        casia_fasd_dir = f'{Dir}/CASIA-FASD/'
+        train_image_dir = casia_fasd_dir
+        train_list = f'{Dir}/CASIA-FASD/protocol/train_list.txt'
+        val_image_dir = casia_fasd_dir
+        val_list = f'{Dir}/CASIA-FASD/protocol/val_list.txt'
+        test_image_dir = casia_fasd_dir
+        test_list = f'{Dir}/CASIA-FASD/protocol/test_list.txt'
+
+    elif data_name == 'Replay-Attack':
+        ra_dir = f'{Dir}/Replay-Attack/'
+        train_image_dir = ra_dir
+        train_list = f'{Dir}/Replay-Attack/protocol/train_list.txt'
+        val_image_dir = ra_dir
+        val_list = f'{Dir}/Replay-Attack/protocol/val_list.txt'
+        test_image_dir = ra_dir
+        test_list = f'{Dir}/Replay-Attack/protocol/test_list.txt'
+
+    elif data_name == 'VFPAD':
+        # Single NIR modality; prot must be 'grandtest'
+        vfpad_dir = f'{Dir}/VFPAD/'
+        train_image_dir = vfpad_dir
+        train_list = f'{Dir}/VFPAD/protocol/grandtest/train_list.txt'
+
+        val_image_dir = vfpad_dir
+        val_list = f'{Dir}/VFPAD/protocol/grandtest/dev_list.txt'
+
+        test_image_dir = vfpad_dir
+        test_list = f'{Dir}/VFPAD/protocol/grandtest/eval_list.txt'
+
     # 跨数据及测试CASIA-RA
     elif data_name == 'CASIA-RA':
         train_image_dir = Dir
@@ -112,6 +151,52 @@ def Get_path(data_name, prot = '1', sub_prot = None):
 
         test_image_dir = Dir
         test_list = f"{Dir}/cbnData/prot/CASIA_test.txt"
+
+    # Cross-dataset: WMCA ↔ HQ-WMCA (single-modal visible only)
+    # WMCA color = grayscale visible; HQ-WMCA visible = Ch0 grayscale
+    # Must use --num_modalities=1 (single-modal) since modalities differ
+    elif data_name == 'WMCA-HQWMCA':
+        NAME = 'WMCA-1'
+        PROT = 'PORT2'
+        train_image_dir = f'{Dir}/{NAME}/'
+        train_list = f"{Dir}/{NAME}/{PROT}/prot5_train_list_color.txt"
+        val_image_dir = f'{Dir}/{NAME}/'
+        val_list = f"{Dir}/{NAME}/{PROT}/prot5_dev_list_color.txt"
+        test_image_dir = f'{Dir}/HQ-WMCA/'
+        test_list = f'{Dir}/HQ-WMCA/protocols/grand_test-curated/test_list_visible.txt'
+
+    elif data_name == 'HQWMCA-WMCA':
+        hqwmca_dir = f'{Dir}/HQ-WMCA/'
+        train_image_dir = hqwmca_dir
+        train_list = f'{Dir}/HQ-WMCA/protocols/grand_test-curated/train_list_visible.txt'
+        val_image_dir = hqwmca_dir
+        val_list = f'{Dir}/HQ-WMCA/protocols/grand_test-curated/val_list_visible.txt'
+        NAME = 'WMCA-1'
+        PROT = 'PORT2'
+        test_image_dir = f'{Dir}/{NAME}/'
+        test_list = f"{Dir}/{NAME}/{PROT}/prot5_test_list_color.txt"
+
+    # Cross-dataset: CASIA-FASD ↔ Replay-Attack (single-modal)
+    # Uses MTCNN-cropped frames for both datasets (consistent face detection)
+    elif data_name == 'CASIA_FASD-RA':
+        casia_fasd_dir = f'{Dir}/CASIA-FASD/'
+        train_image_dir = casia_fasd_dir
+        train_list = f'{Dir}/CASIA-FASD/protocol/train_list.txt'
+        val_image_dir = casia_fasd_dir
+        val_list = f'{Dir}/CASIA-FASD/protocol/val_list.txt'
+        ra_dir = f'{Dir}/Replay-Attack/'
+        test_image_dir = ra_dir
+        test_list = f'{Dir}/Replay-Attack/protocol/test_list_mtcnn.txt'
+
+    elif data_name == 'RA-CASIA_FASD':
+        ra_dir = f'{Dir}/Replay-Attack/'
+        train_image_dir = ra_dir
+        train_list = f'{Dir}/Replay-Attack/protocol/train_list_mtcnn.txt'
+        val_image_dir = ra_dir
+        val_list = f'{Dir}/Replay-Attack/protocol/val_list_mtcnn.txt'
+        casia_fasd_dir = f'{Dir}/CASIA-FASD/'
+        test_image_dir = casia_fasd_dir
+        test_list = f'{Dir}/CASIA-FASD/protocol/test_list.txt'
 
     train_path = {'image_dir': train_image_dir, 'prot_list': train_list}
     val_path = {'image_dir': val_image_dir, 'prot_list': val_list}

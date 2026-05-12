@@ -84,11 +84,8 @@ def TTA_3_cropps_color(image, target_shape=(48, 48, 3)):
 
 
 def TTA_4_cropps(image, target_shape=(32, 32, 3)):
-    if image.shape[0] == RESIZE_SIZE:
-        resize_size = RESIZE_SIZE
-    else:
-        resize_size = int(RESIZE_SIZE / 2)
-    image = cv2.resize(image, (resize_size, resize_size))
+    target_w, target_h = target_shape[0], target_shape[1]
+    image = cv2.resize(image, (target_w, target_h))
     images = []
     image_ = image.copy()
     zeros = image_
@@ -368,7 +365,7 @@ def color_augumentor(image, label=None, target_shape=(32, 32, 3), is_infer=False
                                       # iaa.GammaContrast(gamma=(0.9, 1.1)),  # protocol 3&4 wo
                                       ])
         image = augment_img.augment_image(image)
-        if isLocal:
+        if isLocal and target_shape[0] < RESIZE_SIZE - 10:
             image = TTA_36_cropps(image, target_shape)
             # image = TTA_1_cropps_color(image, target_shape)
         else:
@@ -382,6 +379,42 @@ def color_augumentor(image, label=None, target_shape=(32, 32, 3), is_infer=False
         if isLocal:
             image = random_resize(image)
             # if image.shape[2] == target_shape[0]:
+            image = random_cropping(image, target_shape, is_random=True)
+        return image
+
+
+def strong_color_augumentor(image, label=None, target_shape=(32, 32, 3), is_infer=False, isLocal=False):
+    """Augmentor with stronger perturbations to improve generalization to unseen attack types.
+    Simulates display artifacts (blur, noise, color shift, compression) that occur in replay attacks."""
+    if is_infer:
+        augment_img = iaa.Sequential([iaa.Fliplr(0.5)])
+        image = augment_img.augment_image(image)
+        if isLocal and target_shape[0] < RESIZE_SIZE - 10:
+            image = TTA_36_cropps(image, target_shape)
+        else:
+            image = TTA_4_cropps(image, target_shape)
+        return image
+
+    else:
+        augment_img = iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.Affine(rotate=(-30, 30)),
+            # Display artifact simulation
+            iaa.Sometimes(0.3, iaa.GaussianBlur(sigma=(0.5, 2.0))),
+            iaa.Sometimes(0.3, iaa.AdditiveGaussianNoise(scale=(5, 25))),
+            iaa.Sometimes(0.3, iaa.Add(value=(-25, 25), per_channel=True)),
+            iaa.Sometimes(0.3, iaa.GammaContrast(gamma=(0.6, 1.4))),
+            iaa.Sometimes(0.2, iaa.JpegCompression(compression=(40, 85))),
+            # Domain-invariant augmentations
+            iaa.Sometimes(0.2, iaa.Grayscale(alpha=(0.5, 1.0))),
+            iaa.Sometimes(0.15, iaa.ChannelShuffle(p=1.0)),
+            # CutOut regularization
+            iaa.Sometimes(0.3, iaa.CoarseDropout(p=(0.02, 0.1), size_percent=(0.02, 0.25))),
+        ], random_order=True)
+        image = augment_img.augment_image(image)
+        if isLocal:
+            image = random_resize(image)
             image = random_cropping(image, target_shape, is_random=True)
         return image
 
@@ -500,29 +533,21 @@ def augumentor_OULU(color, label=None, target_shape=(32, 32, 3), is_infer = Fals
     if is_infer:
         augment_img = iaa.Sequential([
             iaa.Fliplr(0.5),
-            # iaa.Add(value=(-10,10),per_channel=True), #protocol 3&4 wo
-            # iaa.GammaContrast(gamma=(0.9, 1.1)), #protocol 3&4 wo
         ])
         color = augment_img.augment_image(color)
-        # color = (color - 127.5) / 128
-        # color = TTA_9_cropps_color(color, target_shape)
         color = TTA_36_cropps(color, target_shape)
 
         return color
     else:
         augment_img_neg = iaa.Sequential([
             iaa.Fliplr(0.5),
-            # iaa.Add(value=(0,20),per_channel=True),
-            iaa.Add(value=(-30, 30), per_channel=True),  # protocol 3 +-10; 4 +- 30;
-            iaa.GammaContrast(gamma=(0.5, 1.5)),  # protocol 3/4 1+-0.5
-            # iaa.Affine(rotate=(-30, 30)),
+            iaa.Add(value=(-30, 30), per_channel=True),
+            iaa.GammaContrast(gamma=(0.5, 1.5)),
         ])
 
         augment_img_pos = iaa.Sequential([
             iaa.Fliplr(0.5),
             iaa.Add(value=(-10,10),per_channel=True),
-            # iaa.Add(value=(0,10),per_channel=True), #protocol 3&4 wo
-            # iaa.GammaContrast(gamma=(0.9, 1.1)), #protocol 3&4 wo
         ])
 
         if random.random() < 0.5:
@@ -531,12 +556,6 @@ def augumentor_OULU(color, label=None, target_shape=(32, 32, 3), is_infer = Fals
             else:
                 color = augment_img_neg.augment_image(color)
 
-        # if random.random() < 0.1:   # protocol 3
-        #    color = CutOut(color)      # protocol 3
-
-        # color = (color - 127.5) / 128
-        # color = RandomErasing(color)  # protocol 3&4 wo
-        # color = TTA_9_cropps_color(color, target_shape)
         color = random_cropping(color, target_shape, is_random=True)
 
         return color

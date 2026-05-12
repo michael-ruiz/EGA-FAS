@@ -6,6 +6,7 @@ import random
 from torch.utils.data import Dataset, DataLoader
 # from data_process.augmentation_1 import *
 from data_process.augmentation import *
+from data_process.augmentation import strong_color_augumentor
 from skimage.color import rgb2ycbcr
 
 
@@ -29,6 +30,8 @@ def Data_Cut(config):
 
         if config.mode == 'infer_test':
             data_cut['test'] = 1
+    elif config.dataset_name in ['HQ-WMCA', 'WMCA-HQWMCA', 'HQWMCA-WMCA']:
+        data_cut = {'train': 1, 'val': 1, 'test': 1}
     return data_cut
 
 def load_list(list_path, data_cut):
@@ -53,7 +56,7 @@ def transform_balance(train_list, data_name):
     # 实现数据集的平衡(在FAS中，一般是欺骗人脸多于真实人脸)
     print('train data balance!')
     idx = 3
-    if data_name == 'WMCA':
+    if data_name in ['WMCA', 'HQ-WMCA', 'WMCA-HQWMCA', 'HQWMCA-WMCA']:
         idx = 5
     pos_list, neg_list = [], []
     all_list = []
@@ -86,7 +89,10 @@ class FAS_multi_Dataset(Dataset):
         self.list_path = list_path
         self.data_name = config.dataset_name
         # self.modality = config.image_modality
-        self.augment = color_augumentor
+        if getattr(config, 'strong_augment', False):
+            self.augment = strong_color_augumentor
+        else:
+            self.augment = color_augumentor
         self.fold_index = config.train_fold_index
         self.balance = balance
         self.isVal = isVal
@@ -96,6 +102,7 @@ class FAS_multi_Dataset(Dataset):
         else:
             self.image_size = RESIZE_SIZE
         self.channels = 0
+        self.num_modalities = getattr(config, 'num_modalities', 3)
         self.map_size = int(config.image_size/16)
         self.label_weight = 0.99
         self.set_mode(config)
@@ -129,7 +136,7 @@ class FAS_multi_Dataset(Dataset):
         img_sub_path = {}
         all_image = {}
         label = None
-        if self.data_name == 'WMCA':
+        if self.data_name in ['WMCA', 'HQ-WMCA', 'WMCA-HQWMCA', 'HQWMCA-WMCA']:
             # RGB、Color、Depth、Infrared、Thermal
             # rgb, color, depth, ir, thermal, label = self.val_list[index]
             # img_sub_path = {'rgb': row[0], 'color': row[1], 'depth': row[2], 'ir': row[3], 'thermal': row[4]}
@@ -193,11 +200,13 @@ class FAS_multi_Dataset(Dataset):
             images = self.get_img(all_image, 2, False)
 
             if random.randint(0, 1) == 0:
-                random_pos = random.randint(0, 2)
+                # Dropout among modalities the model actually uses
+                n_mod = self.num_modalities
+                random_pos = random.randint(0, n_mod - 1)
                 if random.randint(0, 1) == 0:
                     images[:, :, 3 * random_pos:3 * (random_pos + 1)] = 0
                 else:
-                    for i in range(3):
+                    for i in range(n_mod):
                         if i != random_pos:
                             images[:, :, 3 * i:3 * (i + 1)] = 0
 
