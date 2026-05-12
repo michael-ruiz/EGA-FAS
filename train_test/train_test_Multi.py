@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from loss.metric import *
 from tqdm import tqdm
@@ -25,7 +26,9 @@ def train_one_epoch(epoch, train_loader, net, criterion, sgdr, optimizer, config
         input = input.to(device)
         truth = truth.to(device)
         mask = mask.to(device)
-        logit, depth_logits, color_logits, ir_logits, x_map, _ = net.forward(input)
+        outputs = net.forward(input)
+        logit, depth_logits, color_logits, ir_logits, x_map = outputs[:5]
+        aux_logits = outputs[6] if len(outputs) > 6 else None
         truth = truth.view(logit.shape[0])
 
         x_map = x_map.to(torch.float32)
@@ -35,6 +38,24 @@ def train_one_epoch(epoch, train_loader, net, criterion, sgdr, optimizer, config
         loss1 = criterion['BCE'](logit, truth)
         loss_r,loss_d,loss_i,loss2 = criterion['ICMFL'](color_logits, depth_logits, ir_logits, truth)
         loss = r1*loss1 + r2*loss_pwl + r3 * loss2
+
+        # Per-branch auxiliary loss (forces all Gumbel branches to be competent)
+        if aux_logits is not None and hasattr(config, 'aux_loss_weight') and config.aux_loss_weight > 0:
+            aux_loss = sum(F.cross_entropy(a, truth) for a in aux_logits) / len(aux_logits)
+            loss = loss + config.aux_loss_weight * aux_loss
+
+        # MoE-style load balancing loss
+        guidance_weights = outputs[5] if len(outputs) > 5 else None
+        if guidance_weights is not None and hasattr(config, 'balance_loss_weight') and config.balance_loss_weight > 0:
+            eps = 1e-8
+            # Confidence: minimize per-sample entropy → sharper per-sample weights
+            per_sample_entropy = -(guidance_weights * torch.log(guidance_weights + eps)).sum(dim=1).mean()
+            # Balance: maximize batch-average entropy → prevent collapse to one modality
+            batch_avg = guidance_weights.mean(dim=0)
+            batch_entropy = -(batch_avg * torch.log(batch_avg + eps)).sum()
+            # Combined: want low per-sample entropy + high batch entropy
+            balance_loss = per_sample_entropy - batch_entropy
+            loss = loss + config.balance_loss_weight * balance_loss
 
         # Safety check: stop if NaN detected
         if torch.isnan(loss):
@@ -90,10 +111,13 @@ def do_test(net, test_loader, criterion, config):
         input = input.to(device)
         truth = truth.to(device)
         with torch.no_grad():
-            logit, depth_logits, color_logits, ir_logits, x_map, guidance_weights = net(input)
+            outputs = net(input)
+            logit, depth_logits, color_logits, ir_logits, x_map = outputs[:5]
+            guidance_weights = outputs[5] if len(outputs) > 5 else None
             if guidance_weights is not None:
-                # Average weights over n augmentations per sample: [b*n, 3] -> [b, n, 3] -> [b, 3]
-                gw = guidance_weights.view(b, n, 3).mean(dim=1)
+                # Average weights over n augmentations per sample: [b*n, M] -> [b, n, M] -> [b, M]
+                num_mod = guidance_weights.shape[1]
+                gw = guidance_weights.view(b, n, num_mod).mean(dim=1)
                 all_guidance_weights.append(gw.cpu())
             logit = logit.view(b, n, logit.shape[1])
 
@@ -172,14 +196,16 @@ def do_test(net, test_loader, criterion, config):
 
     # Guidance weights analysis (for adaptive guidance mode)
     if all_guidance_weights:
-        weights = torch.cat(all_guidance_weights, dim=0)  # [N, 3]
+        weights = torch.cat(all_guidance_weights, dim=0)  # [N, M]
+        num_mod = weights.shape[1]
+        mod_names = ['color', 'depth', 'ir', 'thermal'][:num_mod]
         print(f"\n{'='*50}")
         print(f"=== Guidance Weights Analysis ===")
         print(f"{'='*50}")
-        print(f"Mean weights: depth={weights[:, 0].mean():.4f}, color={weights[:, 1].mean():.4f}, ir={weights[:, 2].mean():.4f}")
-        print(f"Std weights:  depth={weights[:, 0].std():.4f}, color={weights[:, 1].std():.4f}, ir={weights[:, 2].std():.4f}")
-        print(f"Min weights:  depth={weights[:, 0].min():.4f}, color={weights[:, 1].min():.4f}, ir={weights[:, 2].min():.4f}")
-        print(f"Max weights:  depth={weights[:, 0].max():.4f}, color={weights[:, 1].max():.4f}, ir={weights[:, 2].max():.4f}")
+        print(f"Mean weights: " + ", ".join(f"{n}={weights[:, i].mean():.4f}" for i, n in enumerate(mod_names)))
+        print(f"Std weights:  " + ", ".join(f"{n}={weights[:, i].std():.4f}" for i, n in enumerate(mod_names)))
+        print(f"Min weights:  " + ", ".join(f"{n}={weights[:, i].min():.4f}" for i, n in enumerate(mod_names)))
+        print(f"Max weights:  " + ", ".join(f"{n}={weights[:, i].max():.4f}" for i, n in enumerate(mod_names)))
 
         # Per-class analysis (real vs spoof)
         labels_tensor = torch.from_numpy(labels)
@@ -187,9 +213,11 @@ def do_test(net, test_loader, criterion, config):
         spoof_mask = (labels_tensor == 1)
 
         if real_mask.sum() > 0:
-            print(f"\nReal samples ({real_mask.sum().item()}):  depth={weights[real_mask, 0].mean():.4f}, color={weights[real_mask, 1].mean():.4f}, ir={weights[real_mask, 2].mean():.4f}")
+            print(f"\nReal samples ({real_mask.sum().item()}):  " +
+                  ", ".join(f"{n}={weights[real_mask, i].mean():.4f}" for i, n in enumerate(mod_names)))
         if spoof_mask.sum() > 0:
-            print(f"Spoof samples ({spoof_mask.sum().item()}): depth={weights[spoof_mask, 0].mean():.4f}, color={weights[spoof_mask, 1].mean():.4f}, ir={weights[spoof_mask, 2].mean():.4f}")
+            print(f"Spoof samples ({spoof_mask.sum().item()}): " +
+                  ", ".join(f"{n}={weights[spoof_mask, i].mean():.4f}" for i, n in enumerate(mod_names)))
         print(f"{'='*50}\n")
 
     return loss, correct, probs, labels

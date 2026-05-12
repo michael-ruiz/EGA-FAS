@@ -225,9 +225,13 @@ def init_loss(criterion_name='BCE', device=None, class_num=2):
     return loss
 
 
-def get_criterion(device=None, class_num=2):
+def get_criterion(device=None, class_num=2, label_smoothing=0.0):
     criterion = {}
-    criterion['BCE'] = F.cross_entropy
+    if label_smoothing > 0:
+        from functools import partial
+        criterion['BCE'] = partial(F.cross_entropy, label_smoothing=label_smoothing)
+    else:
+        criterion['BCE'] = F.cross_entropy
     criterion['CCE'] = F.binary_cross_entropy_with_logits
     criterion['FL'] = FocalLoss()
     criterion['CMFL'] = CMFL()

@@ -51,14 +51,18 @@ def run_train(localtime):
         net.load_state_dict(torch.load(init_checkpoint, map_location=lambda storage, loc: storage))
 
     # criterion = softmax_cross_entropy_criterion
-    criterion = get_criterion(device=device, class_num=2)
+    label_smoothing = getattr(config, 'label_smoothing', 0.0)
+    criterion = get_criterion(device=device, class_num=2, label_smoothing=label_smoothing)
 
     # weight_decay = 0.00005
     optimizer = get_optimizer(net, config)
     sgdr = get_lr_scheduler(config, optimizer, net)
+    ls_str = f", label_smoothing:{config.label_smoothing}" if getattr(config, 'label_smoothing', 0) > 0 else ""
+    aug_str = ", strong_augment" if getattr(config, 'strong_augment', False) else ""
     Model_description = f"Dataset:{config.dataset_name}, Protocol:{config.prot}_{config.sub_prot}\n" \
                         f"model:{config.model}, epochs:{config.epochs}, batchsize:{config.batch_size}, lr:{config.lr}\n" \
-                        f"LOSS--BCE:{config.bce}, PWL:{config.pwl}, CMFL:{config.cmfl}, CCE:{config.cce}, ML:{config.ml}\n"
+                        f"LOSS--BCE:{config.bce}, PWL:{config.pwl}, CMFL:{config.cmfl}, CCE:{config.cce}, ML:{config.ml}{ls_str}\n" \
+                        f"Augmentation: {'strong' if getattr(config, 'strong_augment', False) else 'normal'}{aug_str}\n"
     print(Model_description)
     log_file.write(Model_description)
     log_file.flush()
@@ -76,25 +80,29 @@ def run_train(localtime):
     test_min_acer = 1.0
     Loss, ACER, ACC = 0, 0, 0
     start = timer()
-    if config.dataset_name in ['OULU-NPU-1', 'OULU-NPU']:
-        print_seq = 2
-    elif config.dataset_name in ['CASIA-RA', 'RA-CASIA']:
-        print_seq = 2
+    if config.dataset_name in ['CASIA-RA', 'RA-CASIA', 'CASIA_FASD-RA', 'RA-CASIA_FASD', 'WMCA-HQWMCA', 'HQWMCA-WMCA']:
+        print_seq = 100  # eval from epoch 0 for cross-dataset (epochs // 100 ≈ 0)
     else:
         print_seq = 2
     for epoch in range(config.epochs):
         batch_loss, lr = train_one_epoch(epoch, train_loader, net, criterion, sgdr, optimizer, config)
+
+        # Anneal Gumbel-Softmax temperature: linear decay from gumbel_tau to 0.1
+        model_ref = net.module if hasattr(net, 'module') else net
+        if hasattr(model_ref, 'use_gumbel') and model_ref.use_gumbel:
+            tau = max(0.1, config.gumbel_tau * (1 - epoch / config.epochs))
+            model_ref.set_gumbel_tau(tau)
+
         if epoch >= config.epochs // print_seq:
         # if True:
             net.eval()
 
-            if config.dataset_name in ['CASIA-RA', 'RA-CASIA']:
+            if config.dataset_name in ['CASIA-RA', 'RA-CASIA', 'CASIA_FASD-RA', 'RA-CASIA_FASD', 'WMCA-HQWMCA', 'HQWMCA-WMCA']:
                 # 验证集测试
                 val_loss, val_eval, val_TPR_FPRS, val_min_acer = test_write_reslt(epoch, net, val_loader, criterion, log_file, save_path, localtime, val_min_acer, state='val')
                 Loss, ACER, ACC = val_loss, val_eval["ACER"], val_eval["ACC"]
-                # 测试集测试
-                if val_eval["ACER"] == 0:
-                    test_loss, test_eval, test_TPR_FPRS, test_min_acer = test_write_reslt(epoch, net, test_loader, criterion, log_file, save_path, localtime, test_min_acer, state='test')
+                # 测试集测试 (always evaluate cross-domain; don't wait for val ACER=0)
+                test_loss, test_eval, test_TPR_FPRS, test_min_acer = test_write_reslt(epoch, net, test_loader, criterion, log_file, save_path, localtime, test_min_acer, state='test')
                     
             else:
                 test_loss, test_eval, test_TPR_FPRS, test_min_acer = test_write_reslt(epoch, net, val_loader, criterion, log_file, save_path, localtime, test_min_acer, state='test')
@@ -149,8 +157,9 @@ def run_test(config,localtime):
         print('\t loader initial_checkpoint = %s\n' % init_checkpoint)
         # get datasets
         train_loader, val_loader, test_loader = bulid_dataset(config)
-        criterion = get_criterion(device=device, class_num=2)
-        
+        label_smoothing = getattr(config, 'label_smoothing', 0.0)
+        criterion = get_criterion(device=device, class_num=2, label_smoothing=label_smoothing)
+
         print('infer!!!!!!!!!')
         # get net
         net = get_model(config=config, num_class=2)
@@ -159,7 +168,11 @@ def run_test(config,localtime):
         # Remove 'module.' prefix if model was saved with DataParallel
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        net.load_state_dict(state_dict)
+        try:
+            net.load_state_dict(state_dict)
+        except RuntimeError as e:
+            print(f'  Skipping incompatible checkpoint: {e}')
+            continue
         if torch.cuda.is_available():
             net = net.cuda()
         else:

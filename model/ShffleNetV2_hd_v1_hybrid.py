@@ -14,25 +14,27 @@ from model.backbone.ShffleNetv2_base_hd_v1_hybrid import ShuffleNetV2Hybrid
 
 class GuidanceSelector(nn.Module):
     """Learns per-sample weights for guidance modality selection."""
-    def __init__(self, channel=64, hidden_dim=64):
+    def __init__(self, num_modalities=3, channel=64, hidden_dim=64, ir_prior=0.0):
         super(GuidanceSelector, self).__init__()
+        self.num_modalities = num_modalities
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.mlp = nn.Sequential(
-            nn.Linear(channel * 3, hidden_dim),
+            nn.Linear(channel * num_modalities, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 3),
+            nn.Linear(hidden_dim, num_modalities),
         )
+        # Learnable global modality preference (ir is index 2)
+        prior = [0.0] * num_modalities
+        if num_modalities > 2:
+            prior[2] = ir_prior
+        self.prior = nn.Parameter(torch.tensor(prior))
 
-    def forward(self, depth_feas, color_feas, ir_feas):
-        # GAP: [B, 64, H, W] -> [B, 64]
-        depth_vec = self.gap(depth_feas).view(depth_feas.size(0), -1)
-        color_vec = self.gap(color_feas).view(color_feas.size(0), -1)
-        ir_vec = self.gap(ir_feas).view(ir_feas.size(0), -1)
-
-        # Concat -> MLP -> Softmax
-        concat_vec = torch.cat([depth_vec, color_vec, ir_vec], dim=1)
-        weights = F.softmax(self.mlp(concat_vec), dim=1)
-        return weights  # [B, 3]
+    def forward(self, feas_list):
+        """feas_list: list of [B, C, H, W] feature maps, one per modality."""
+        vecs = [self.gap(f).view(f.size(0), -1) for f in feas_list]
+        concat_vec = torch.cat(vecs, dim=1)
+        logits = self.mlp(concat_vec) + self.prior
+        return logits  # [B, num_modalities]
 
 
 class CrossAtten(nn.Module):
@@ -70,54 +72,72 @@ class Multi_FusionNet_Hybrid(nn.Module):
 
     Args:
         num_class: number of output classes
-        hybrid_mode:
-            - 'hybrid_a': DW(2,3) + Ghost(4) + Soft Fusion (differentiable)
-            - 'hybrid_b': DW(2) + Ghost(3,4) + Soft Fusion (differentiable)
-            - 'hybrid_c': DW(2,3) + Ghost(4) + Hard Argmax (same backbone as A)
-            - 'hybrid_d': DW(2) + Ghost(3,4) + Hard Argmax (same backbone as B)
-            - 'ghost': Ghost everywhere
-            - 'depthwise': Depthwise everywhere
+        num_modalities: number of modalities (3=color+depth+ir, 4=+thermal)
+        hybrid_mode: backbone variant ('hybrid_a', 'hybrid_b', 'hybrid_c', 'hybrid_d', etc.)
         use_eca: whether to use ECA (True) or SE (False) attention
-        guidance_modality: fixed guidance modality ('depth', 'color', 'ir')
+        guidance_modality: fixed guidance modality ('depth', 'color', 'ir', 'thermal')
         adaptive_guidance: if True, use learned guidance weights
     """
+
+    # Modality names in canonical order (matches input channel layout)
+    MODALITY_NAMES = ['color', 'depth', 'ir', 'thermal']
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters())
 
     def print_info(self):
-        print(f'Model: Multi_FusionNet_Hybrid')
+        print(f'Model: Multi_FusionNet_Hybrid ({self.num_modalities} modalities)')
         print(f'Hybrid mode: {self.hybrid_mode}')
-        print(f'Backbone config: {self.rgb_backbone.get_config_str()}')
-        print(f'Fusion type: {"Soft Weighted" if self.use_soft_fusion else "Hard Argmax"}')
+        print(f'Attention: {"ECA" if self.use_eca else "SE"}')
+        print(f'Backbone config: {self.backbones[0].get_config_str()}')
+        fusion_name = "Gumbel-Softmax" if self.use_gumbel else ("Soft Weighted" if self.use_soft_fusion else "Hard Argmax")
+        print(f'Fusion type: {fusion_name}')
         print(f'Adaptive guidance: {self.adaptive_guidance}')
+        if self.adaptive_guidance:
+            print(f'Guidance temperature: {self.guidance_temperature}')
         print(f'Parameters: {self.count_parameters():,}')
         print('')
 
-    def __init__(self, num_class=10, hybrid_mode='hybrid_a', use_eca=True,
-                 guidance_modality='depth', adaptive_guidance=False):
+    def set_gumbel_tau(self, tau):
+        """Set Gumbel-Softmax temperature for annealing."""
+        self.gumbel_tau = tau
+
+    def __init__(self, num_class=10, num_modalities=3, hybrid_mode='hybrid_a', use_eca=True,
+                 guidance_modality='depth', adaptive_guidance=False, fusion_type=None,
+                 guidance_temperature=1.0, ir_prior=0.0):
         super(Multi_FusionNet_Hybrid, self).__init__()
+        self.num_modalities = num_modalities
         self.hybrid_mode = hybrid_mode
+        self.use_eca = use_eca
         self.guidance_modality = guidance_modality
         self.adaptive_guidance = adaptive_guidance
+        self.guidance_temperature = guidance_temperature
 
-        # Determine fusion type based on hybrid_mode
-        # hybrid_a, hybrid_b use soft fusion; hybrid_c, hybrid_d use hard argmax
-        self.use_soft_fusion = hybrid_mode in ['hybrid_a', 'hybrid_b', 'ghost', 'depthwise']
+        self.use_soft_fusion = True
+        self.use_gumbel = False
+        if fusion_type is not None:
+            self.use_soft_fusion = (fusion_type == 'soft')
+            self.use_gumbel = (fusion_type == 'gumbel')
 
-        # Three backbone branches with hybrid architecture
-        self.rgb_backbone = ShuffleNetV2Hybrid(input_c=3, hybrid_mode=hybrid_mode, use_eca=use_eca)
-        self.depth_backbone = ShuffleNetV2Hybrid(input_c=3, hybrid_mode=hybrid_mode, use_eca=use_eca)
-        self.ir_backbone = ShuffleNetV2Hybrid(input_c=3, hybrid_mode=hybrid_mode, use_eca=use_eca)
+        self.gumbel_tau = 1.0
+
+        # Create one backbone per modality
+        self.backbones = nn.ModuleList([
+            ShuffleNetV2Hybrid(input_c=3, hybrid_mode=hybrid_mode, use_eca=use_eca)
+            for _ in range(num_modalities)
+        ])
 
         init_channel = 64
         self.cross_atten = CrossAtten(channel=init_channel)
 
         if self.adaptive_guidance:
-            self.guidance_selector = GuidanceSelector(channel=init_channel, hidden_dim=64)
+            self.guidance_selector = GuidanceSelector(
+                num_modalities=num_modalities, channel=init_channel,
+                hidden_dim=64, ir_prior=ir_prior)
 
+        # Each guide option: (num_modalities-1) cross-attention outputs + guide = num_modalities * 64
         self.bottleneck = nn.Sequential(
-            nn.Conv2d(init_channel * 3, init_channel, kernel_size=1, padding=0),
+            nn.Conv2d(init_channel * num_modalities, init_channel, kernel_size=1, padding=0),
             nn.BatchNorm2d(init_channel),
             nn.ReLU(inplace=True)
         )
@@ -128,93 +148,73 @@ class Multi_FusionNet_Hybrid(nn.Module):
         self.drop = nn.Dropout(0.3)
 
     def forward(self, x):
-        # 4-modality version:
-        # Input x expected shape: (batch, 12, H, W) where channels are:
-        # [0:3] = Color, [3:6] = Depth, [6:9] = IR, [9:12] = Thermal
-        color, depth, ir, thermal = x[:, 0:3, :, :], x[:, 3:6, :, :], x[:, 6:9, :, :], x[:, 9:12, :, :]
+        # Split input into per-modality 3-channel tensors
+        # x shape: (batch, num_modalities*3, H, W)
+        modality_inputs = [x[:, i*3:(i+1)*3, :, :] for i in range(self.num_modalities)]
 
         # Backbone feature extraction
-        color_feas = self.rgb_backbone(color)
-        depth_feas = self.depth_backbone(depth)
-        ir_feas = self.ir_backbone(ir)
+        all_feas = [backbone(inp) for backbone, inp in zip(self.backbones, modality_inputs)]
 
         # Cross-attention fusion
         guidance_weights = None
+        aux_logits = None
 
         if self.adaptive_guidance:
-            # Compute per-sample weights
-            guidance_weights = self.guidance_selector(depth_feas, color_feas, ir_feas)  # [B, 3]
+            logits = self.guidance_selector(all_feas)  # [B, num_modalities]
+            guidance_weights = F.softmax(logits / self.guidance_temperature, dim=1)
 
-            if self.use_soft_fusion:
-                # Soft Weighted Fusion: compute ALL cross-attention outputs (vectorized)
-                # Then combine them using learned weights - fully differentiable!
+            if self.use_gumbel:
+                guide_feas_list = self._compute_all_guides(all_feas)
 
-                # Depth as guide: other modalities attend to depth
-                ca_c2d = self.cross_atten(color_feas, depth_feas)
-                ca_i2d = self.cross_atten(ir_feas, depth_feas)
-                fea_depth_guide = torch.cat([ca_c2d, ca_i2d, depth_feas], dim=1)
+                if self.training:
+                    one_hot = F.gumbel_softmax(logits, tau=self.gumbel_tau, hard=True)
+                else:
+                    one_hot = torch.zeros_like(logits)
+                    one_hot.scatter_(1, torch.argmax(logits, dim=1, keepdim=True), 1.0)
 
-                # Color as guide: other modalities attend to color
-                ca_d2c = self.cross_atten(depth_feas, color_feas)
-                ca_i2c = self.cross_atten(ir_feas, color_feas)
-                fea_color_guide = torch.cat([ca_d2c, ca_i2c, color_feas], dim=1)
+                # Auxiliary per-branch classification
+                if self.training:
+                    aux_logits = tuple(
+                        self.fc(self.drop(self.avgpool8(self.bottleneck(gf)).squeeze(-1).squeeze(-1)))
+                        for gf in guide_feas_list
+                    )
+                else:
+                    aux_logits = None
 
-                # IR as guide: other modalities attend to ir
-                ca_d2i = self.cross_atten(depth_feas, ir_feas)
-                ca_c2i = self.cross_atten(color_feas, ir_feas)
-                fea_ir_guide = torch.cat([ca_d2i, ca_c2i, ir_feas], dim=1)
+                B = all_feas[0].size(0)
+                w = one_hot.view(B, self.num_modalities, 1, 1, 1)
+                fea = sum(w[:, i] * guide_feas_list[i] for i in range(self.num_modalities))
 
-                # Soft weighted combination (fully differentiable)
-                B, C, H, W = fea_depth_guide.shape
-                w = guidance_weights.view(B, 3, 1, 1, 1)
-                fea = (w[:, 0] * fea_depth_guide +
-                       w[:, 1] * fea_color_guide +
-                       w[:, 2] * fea_ir_guide)
+            elif self.use_soft_fusion:
+                guide_feas_list = self._compute_all_guides(all_feas)
+
+                B = all_feas[0].size(0)
+                w = guidance_weights.view(B, self.num_modalities, 1, 1, 1)
+                fea = sum(w[:, i] * guide_feas_list[i] for i in range(self.num_modalities))
             else:
-                # Hard Argmax Selection: select single modality per sample (non-differentiable)
+                # Hard Argmax Selection
                 selected_modality = torch.argmax(guidance_weights, dim=1)  # [B]
-
-                B = depth_feas.size(0)
+                B = all_feas[0].size(0)
                 fea_list = []
                 for i in range(B):
                     mod = selected_modality[i].item()
-                    if mod == 0:  # depth is guide
-                        fea_i = torch.cat([
-                            self.cross_atten(color_feas[i:i+1], depth_feas[i:i+1]),
-                            self.cross_atten(ir_feas[i:i+1], depth_feas[i:i+1]),
-                            depth_feas[i:i+1]
-                        ], dim=1)
-                    elif mod == 1:  # color is guide
-                        fea_i = torch.cat([
-                            self.cross_atten(depth_feas[i:i+1], color_feas[i:i+1]),
-                            self.cross_atten(ir_feas[i:i+1], color_feas[i:i+1]),
-                            color_feas[i:i+1]
-                        ], dim=1)
-                    else:  # ir is guide (mod == 2)
-                        fea_i = torch.cat([
-                            self.cross_atten(depth_feas[i:i+1], ir_feas[i:i+1]),
-                            self.cross_atten(color_feas[i:i+1], ir_feas[i:i+1]),
-                            ir_feas[i:i+1]
-                        ], dim=1)
-                    fea_list.append(fea_i)
+                    guide = all_feas[mod]
+                    others = [f for j, f in enumerate(all_feas) if j != mod]
+                    parts = [self.cross_atten(o[i:i+1], guide[i:i+1]) for o in others]
+                    parts.append(guide[i:i+1])
+                    fea_list.append(torch.cat(parts, dim=1))
                 fea = torch.cat(fea_list, dim=0)
         else:
             # Fixed guidance modality
-            if self.guidance_modality == 'depth':
-                guide_other1 = self.cross_atten(depth_feas, color_feas)
-                guide_other2 = self.cross_atten(depth_feas, ir_feas)
-                guide_feas = depth_feas
-            elif self.guidance_modality == 'color':
-                guide_other1 = self.cross_atten(color_feas, depth_feas)
-                guide_other2 = self.cross_atten(color_feas, ir_feas)
-                guide_feas = color_feas
-            elif self.guidance_modality == 'ir':
-                guide_other1 = self.cross_atten(ir_feas, depth_feas)
-                guide_other2 = self.cross_atten(ir_feas, color_feas)
-                guide_feas = ir_feas
-            else:
+            mod_names = self.MODALITY_NAMES[:self.num_modalities]
+            if self.guidance_modality not in mod_names:
                 raise ValueError(f"Unknown guidance_modality: {self.guidance_modality}")
-            fea = torch.cat([guide_other1, guide_feas, guide_other2], dim=1)
+            guide_idx = mod_names.index(self.guidance_modality)
+            guide_feas = all_feas[guide_idx]
+            others = [f for j, f in enumerate(all_feas) if j != guide_idx]
+            parts = [self.cross_atten(o, guide_feas) for o in others]
+            parts.append(guide_feas)
+            fea = torch.cat(parts, dim=1)
 
         x = self.bottleneck(fea)
         x_map = torch.sigmoid(self.dec(x))
@@ -222,12 +222,21 @@ class Multi_FusionNet_Hybrid(nn.Module):
         regmap8 = self.avgpool8(x)
         x = self.fc(self.drop(regmap8.squeeze(-1).squeeze(-1)))
 
-        # Flatten features for auxiliary outputs
-        depth_feas_flat = depth_feas.view(depth_feas.size(0), -1)
-        color_feas_flat = color_feas.view(color_feas.size(0), -1)
-        ir_feas_flat = ir_feas.view(ir_feas.size(0), -1)
+        # Flatten first 3 modality features for ICMFL loss (color, depth, ir)
+        feas_flat = [f.view(f.size(0), -1) for f in all_feas[:3]]
 
-        return x, depth_feas_flat, color_feas_flat, ir_feas_flat, x_map, guidance_weights
+        return x, feas_flat[1], feas_flat[0], feas_flat[2], x_map, guidance_weights, aux_logits
+
+    def _compute_all_guides(self, all_feas):
+        """Compute cross-attention fusion for all guide options."""
+        guide_feas_list = []
+        for guide_idx in range(self.num_modalities):
+            guide = all_feas[guide_idx]
+            parts = [self.cross_atten(all_feas[j], guide)
+                     for j in range(self.num_modalities) if j != guide_idx]
+            parts.append(guide)
+            guide_feas_list.append(torch.cat(parts, dim=1))
+        return guide_feas_list
 
 
 def get_hybrid_a_model(num_class=2, adaptive_guidance=True):
@@ -291,38 +300,34 @@ def get_hybrid_d_model(num_class=2, adaptive_guidance=True):
 
 
 if __name__ == '__main__':
-    # Test all configurations
+    # Test with 3 and 4 modalities
     print("=" * 70)
     print("Multi_FusionNet_Hybrid Model Comparison")
     print("=" * 70)
 
-    x = torch.randn(2, 12, 112, 112)  # Batch of 2, 4 modalities * 3 channels
+    for num_mod in [3, 4]:
+        x = torch.randn(2, num_mod * 3, 112, 112)
+        print(f"\n--- {num_mod} modalities (input: {x.shape}) ---")
 
-    configs = [
-        ('hybrid_a', True, 'Hybrid A: DW(2,3)+Ghost(4) + Soft Fusion'),
-        ('hybrid_b', True, 'Hybrid B: DW(2)+Ghost(3,4) + Soft Fusion'),
-        ('hybrid_c', True, 'Hybrid C: DW(2,3)+Ghost(4) + Hard Argmax'),
-        ('hybrid_d', True, 'Hybrid D: DW(2)+Ghost(3,4) + Hard Argmax'),
-        ('ghost', True, 'Full Ghost + Soft Fusion'),
-    ]
+        for mode, adaptive, desc in [
+            ('hybrid_d', True, f'Hybrid D + Soft Fusion ({num_mod} mod)'),
+        ]:
+            model = Multi_FusionNet_Hybrid(
+                num_class=2,
+                num_modalities=num_mod,
+                hybrid_mode=mode,
+                use_eca=True,
+                adaptive_guidance=adaptive
+            )
+            model.eval()
+            params = model.count_parameters()
 
-    for mode, adaptive, desc in configs:
-        model = Multi_FusionNet_Hybrid(
-            num_class=2,
-            hybrid_mode=mode,
-            use_eca=True,
-            adaptive_guidance=adaptive
-        )
-        model.eval()
+            with torch.no_grad():
+                out, d, c, i, x_map, gw, _ = model(x)
 
-        params = model.count_parameters()
-
-        with torch.no_grad():
-            out, d, c, i, x_map, gw = model(x)
-
-        print(f"\n{desc}")
-        print(f"  Backbone: {model.rgb_backbone.get_config_str()}")
-        print(f"  Parameters: {params:,}")
-        print(f"  Output shape: {out.shape}")
-        if gw is not None:
-            print(f"  Guidance weights: {gw[0].tolist()}")
+            print(f"\n{desc}")
+            print(f"  Backbone: {model.backbones[0].get_config_str()}")
+            print(f"  Parameters: {params:,}")
+            print(f"  Output shape: {out.shape}")
+            if gw is not None:
+                print(f"  Guidance weights: {gw[0].tolist()}")

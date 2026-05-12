@@ -75,7 +75,8 @@ def calc_flops(model, config, input_size):
     channel_num = 3
   
     if config.is_Multi:  # 多模态
-        channel_num = 9
+        num_mod = getattr(config, 'num_modalities', 3)
+        channel_num = 3 * num_mod
     if '0.4.' in torch.__version__:
         if USE_GPU:
             input = torch.cuda.FloatTensor(torch.rand(batch_size, channel_num, input_size, input_size).cuda())

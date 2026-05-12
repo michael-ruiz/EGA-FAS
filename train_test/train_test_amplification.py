@@ -29,6 +29,7 @@ def train_one_epoch(epoch, train_loader, net, criterion, sgdr, optimizer, config
 
         precision, _ = metric(logit, truth)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
         optimizer.step()
         optimizer.zero_grad()
         batch_loss[:2] = np.array((loss.item(), precision.item(),))  # 损失函数和准确率 [2.6929493 0.671875 ]

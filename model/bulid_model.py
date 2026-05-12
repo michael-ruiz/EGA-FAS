@@ -2,12 +2,52 @@ def get_model(config, num_class, is_pruning=False):
     myself_net = ['FeatherNetB','FeatherNetA', 'ResNet_hd', 'ShffleNetV2_hd', 'ShffleNetV2_hd_v3','ShffleNetV2_hd_v4','ShffleNetV2_hd_v5',
     'ShffleNetV2_hd_v1','ShffleNetV2_hd_v2', 'MobileNetV2_hd', 'GhostNet_hd', 'FiveNet','FiveNet_5','FiveNet_1','FiveNet_6', 'FiveNet_4',
     'FiveNet_3','FiveNet_2', 'FiveNet_2_1','FiveNet_2_2','FiveNet_2_3','FiveNet_2_4','FiveNet_2_5','SixNet',
-    'ShffleNetV2_hd_v1_hybrid_a', 'ShffleNetV2_hd_v1_hybrid_b', 'ShffleNetV2_hd_v1_hybrid_c', 'ShffleNetV2_hd_v1_hybrid_d']
+    'ShffleNetV2_hd_v1_hybrid_a', 'ShffleNetV2_hd_v1_hybrid_b', 'ShffleNetV2_hd_v1_hybrid_c', 'ShffleNetV2_hd_v1_hybrid_d',
+    'ShffleNetV2_hd_v1_ablation_eca', 'ShffleNetV2_hd_v1_ablation_ghost', 'ShffleNetV2_hd_v1_ablation_adaptive',
+    'ECA_FAS_ir',
+    'ViT_hd_v1']
+
+    # Handle ablation models (hardcoded params to prevent misconfiguration)
+    ablation_map = {
+        'ShffleNetV2_hd_v1_ablation_eca': {
+            'hybrid_mode': 'depthwise', 'use_eca': True,
+            'adaptive_guidance': False, 'fusion_type': None,
+        },
+        'ShffleNetV2_hd_v1_ablation_ghost': {
+            'hybrid_mode': 'hybrid_d', 'use_eca': False,
+            'adaptive_guidance': False, 'fusion_type': None,
+        },
+        'ShffleNetV2_hd_v1_ablation_adaptive': {
+            'hybrid_mode': 'depthwise', 'use_eca': False,
+            'adaptive_guidance': True, 'fusion_type': 'hard',
+        },
+        'ECA_FAS_ir': {
+            'hybrid_mode': 'hybrid_d', 'use_eca': True,
+            'adaptive_guidance': True, 'fusion_type': None,
+        },
+    }
+    if config.model in ablation_map:
+        from model.ShffleNetV2_hd_v1_hybrid import Multi_FusionNet_Hybrid
+        params = ablation_map[config.model]
+        guidance_modality = getattr(config, 'guidance_modality', 'depth')
+        ir_prior = getattr(config, 'ir_prior', 0.0)
+        num_modalities = getattr(config, 'num_modalities', 3)
+        net = Multi_FusionNet_Hybrid(
+            num_class=num_class,
+            num_modalities=num_modalities,
+            hybrid_mode=params['hybrid_mode'],
+            use_eca=params['use_eca'],
+            guidance_modality=guidance_modality,
+            adaptive_guidance=params['adaptive_guidance'],
+            fusion_type=params['fusion_type'],
+            ir_prior=ir_prior,
+        )
+        net.print_info()
+        return net
 
     # Handle hybrid models separately
     if config.model in ['ShffleNetV2_hd_v1_hybrid_a', 'ShffleNetV2_hd_v1_hybrid_b',
                         'ShffleNetV2_hd_v1_hybrid_c', 'ShffleNetV2_hd_v1_hybrid_d']:
-        from model.ShffleNetV2_hd_v1_hybrid import Multi_FusionNet_Hybrid
         mode_map = {
             'ShffleNetV2_hd_v1_hybrid_a': 'hybrid_a',
             'ShffleNetV2_hd_v1_hybrid_b': 'hybrid_b',
@@ -15,16 +55,42 @@ def get_model(config, num_class, is_pruning=False):
             'ShffleNetV2_hd_v1_hybrid_d': 'hybrid_d',
         }
         hybrid_mode = mode_map[config.model]
+
+        if not config.is_Multi:
+            # Single-modal: use hybrid backbone without cross-attention
+            from model.ShffleNetV2_hd_v1 import Single_branchNet_Hybrid
+            net = Single_branchNet_Hybrid(num_class=num_class, hybrid_mode=hybrid_mode)
+            return net
+
+        from model.ShffleNetV2_hd_v1_hybrid import Multi_FusionNet_Hybrid
         guidance_modality = getattr(config, 'guidance_modality', 'depth')
         adaptive_guidance = getattr(config, 'adaptive_guidance', False)
+        fusion_type = getattr(config, 'fusion_type', None)
+        guidance_temperature = getattr(config, 'guidance_temperature', 1.0)
+        num_modalities = getattr(config, 'num_modalities', 3)
         net = Multi_FusionNet_Hybrid(
             num_class=num_class,
+            num_modalities=num_modalities,
             hybrid_mode=hybrid_mode,
             use_eca=True,
             guidance_modality=guidance_modality,
-            adaptive_guidance=adaptive_guidance
+            adaptive_guidance=adaptive_guidance,
+            fusion_type=fusion_type,
+            guidance_temperature=guidance_temperature
         )
         net.print_info()
+        return net
+
+    # Handle ViT models
+    if config.model == 'ViT_hd_v1':
+        from model.ViT_hd_v1 import Multi_FusionNet, Single_branchNet
+        if config.is_Multi:
+            guidance_modality = getattr(config, 'guidance_modality', 'depth')
+            adaptive_guidance = getattr(config, 'adaptive_guidance', False)
+            net = Multi_FusionNet(guidance_modality=guidance_modality,
+                                  adaptive_guidance=adaptive_guidance)
+        else:
+            net = Single_branchNet()
         return net
 
     if config.model in myself_net:

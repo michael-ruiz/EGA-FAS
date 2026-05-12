@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 from model.backbone.ShffleNetv2_base_hd_v1 import ShuffleNetV2
+from model.backbone.ShffleNetv2_base_hd_v1_hybrid import ShuffleNetV2Hybrid
 from model.backbone.Common_fun import SELayer, h_swish
 import torch.nn.functional as F
 
@@ -40,9 +41,42 @@ class Single_branchNet(nn.Module):
         x_map = torch.sigmoid(self.dec(x))
 
         output = self.avg_pool(x)
-        
+
         x = self.fc(self.drop(output.squeeze(-1).squeeze(-1)))
         return x, x_map
+
+
+class Single_branchNet_Hybrid(nn.Module):
+    """Single-branch version of hybrid_d using Ghost+ECA backbone.
+
+    Mirrors Single_branchNet but substitutes ShuffleNetV2Hybrid so that the
+    improved backbone (Ghost modules in stages 3-4, ECA attention) is used
+    without multi-modal cross-attention.  Compatible with the single-modal
+    training loop in train_test/train_test_amplification.py.
+    """
+
+    def __init__(self, num_class=2, hybrid_mode='hybrid_d'):
+        super(Single_branchNet_Hybrid, self).__init__()
+        self.raw_img_moudle = ShuffleNetV2Hybrid(hybrid_mode=hybrid_mode, use_eca=True)
+        last_channel = 64
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(last_channel, last_channel, kernel_size=1, padding=0),
+            nn.BatchNorm2d(last_channel),
+            nn.ReLU(inplace=True))
+        self.dec = nn.Conv2d(last_channel, 1, kernel_size=1, stride=1, padding=0)
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.drop = nn.Dropout(0.5)
+        self.fc = nn.Linear(last_channel, num_class)
+
+    def forward(self, x):
+        x = self.raw_img_moudle(x)
+        x = self.bottleneck(x)
+        x_map = torch.sigmoid(self.dec(x))
+        output = self.avg_pool(x)
+        x = self.fc(self.drop(output.squeeze(-1).squeeze(-1)))
+        return x, x_map
+
+
 """
 ###################TWO MODALITY##########################################
 class Multi_FusionNet(nn.Module):
