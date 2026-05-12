@@ -20,9 +20,15 @@ def get_save_path(config, localtime):
         if config.image_modality is None:
             # 单模态 /results/OULU-NPU/CDCN_112
             save_path = os.path.join(out_root, config.dataset_name, config.flod_name)
-            # 文件命名 CDCN_112_port3.1__时间
             if config.prot is not None:
+                save_path = os.path.join(save_path, config.prot)
+            if config.sub_prot is not None:
+                save_path = os.path.join(save_path, config.sub_prot)
+            # 文件命名 CDCN_112_port3.1__时间
+            if config.prot is not None and config.sub_prot is not None:
                 file_name = config.model + '_' + str(config.image_size) + '_prot' + config.prot + '.' + config.sub_prot + '_' +localtime + '.txt'
+            elif config.prot is not None:
+                file_name = config.model + '_' + str(config.image_size) + '_prot' + config.prot + '_' + localtime + '.txt'
             else:
                 file_name = config.model + '_' + str(config.image_size) + '_' + localtime + '.txt'
         else:
